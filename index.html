@@ -1,22 +1,357 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Yeye Runner — Endless Runner</title>
-  <link rel="stylesheet" href="styles.css">
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
+<title>Mobile Heart Lab — Shake to Affect Heartbeat</title>
+<style>
+  :root{
+    --bg:#050b18;
+    --panel: rgba(255,255,255,0.04);
+    --accent:#ff6b6b;
+    --text:#e6f7ff;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%; margin:0; font-family:Inter, Roboto, Arial, sans-serif; background:linear-gradient(180deg,#040814 0%, #071227 100%); color:var(--text);}
+  .wrap{max-width:900px; margin:18px auto; padding:12px; display:flex; gap:12px; flex-direction:column; align-items:center;}
+  .panel{width:100%; background:var(--panel); border-radius:12px; padding:14px; box-shadow:0 8px 24px rgba(0,0,0,0.5);}
+  .title{display:flex; align-items:center; gap:12px;}
+  h1{margin:0; font-size:18px; letter-spacing:0.6px;}
+  p.small{margin:8px 0 0 0; opacity:0.9; font-size:13px;}
+  #stage{display:flex; gap:12px; align-items:center; justify-content:center; width:100%;}
+  /* Heart & EKG layout */
+  .left{flex:0 0 220px; display:flex; align-items:center; justify-content:center; position:relative; height:220px;}
+  .right{flex:1; min-width:220px; height:220px; display:flex; align-items:center; justify-content:center;}
+  svg.heart{width:160px; height:160px; transform-origin:center center; will-change:transform; filter:drop-shadow(0 8px 20px rgba(255,80,80,0.08));}
+  .bpmBadge{position:absolute; top:12px; left:12px; background:rgba(0,0,0,0.45); padding:6px 8px; border-radius:8px; font-weight:700; font-size:14px;}
+  canvas{width:100%; height:100%; border-radius:8px; background:linear-gradient(90deg,#021428 0%, #001219 100%);}
+  .hint{font-size:13px; margin-top:8px; opacity:0.9; text-align:center;}
+  .btn{display:inline-block; background:var(--accent); color:#061221; padding:8px 12px; border-radius:10px; font-weight:700; cursor:pointer; margin-top:8px;}
+  .smallFooter{font-size:12px; opacity:0.7; margin-top:8px; text-align:center;}
+  @media (max-width:520px){
+    .left{flex:0 0 160px; height:160px}
+    svg.heart{width:120px;height:120px}
+  }
+</style>
 </head>
 <body>
-  <div id="ui">
-    <h1>Yeye Runner</h1>
-    <div id="score">Score: 0</div>
-    <div id="instructions">
-      Press <strong>Space</strong> or <strong>Up Arrow</strong> to jump. Press <strong>R</strong> to restart.
+  <div class="wrap">
+    <div class="panel title">
+      <h1>Mobile Heart Lab — Shake to Affect Heartbeat</h1>
+    </div>
+
+    <div class="panel" id="stage">
+      <div class="left">
+        <div class="bpmBadge" id="bpm">BPM: 60</div>
+
+        <!-- SVG Heart (will scale to simulate beat) -->
+        <svg class="heart" id="heart" viewBox="0 0 32 29" aria-hidden="true">
+          <path id="heartPath" d="M23.6 2.5c-2.7 0-4.9 1.8-5.6 4.1C17.3 4.3 15 2.5 12.3 2.5 8.6 2.5 5.7 5.2 5.7 8.8c0 6.2 10.2 12.6 13.9 15 3.7-2.4 13.9-8.8 13.9-15 0-3.6-2.9-6.3-6.8-6.3z" fill="url(#g1)"/>
+          <defs>
+            <linearGradient id="g1" x1="0" x2="1" y1="0" y2="1">
+              <stop offset="0%" stop-color="#ffb3b3"/>
+              <stop offset="55%" stop-color="#ff6b6b"/>
+              <stop offset="100%" stop-color="#ff2d2d"/>
+            </linearGradient>
+          </defs>
+        </svg>
+      </div>
+
+      <div class="right">
+        <canvas id="ekg"></canvas>
+      </div>
+    </div>
+
+    <div class="panel">
+      <p class="small">Instructions: Tap anywhere to start (permissions for Device Motion on some iOS devices will appear). Then shake/tilt your phone — the heart rate (BPM) will rise with stronger shakes. Keep the phone steady to let it return to baseline.</p>
+      <div style="display:flex; gap:8px; align-items:center; margin-top:10px;">
+        <div class="btn" id="startBtn">Tap to Start</div>
+        <div style="flex:1"></div>
+        <div class="smallFooter">Designed for mobile. No data leaves your device.</div>
+      </div>
     </div>
   </div>
 
-  <canvas id="game" width="800" height="320" aria-label="Yeye Runner game"></canvas>
+<script>
+/*
+Mobile Heart Lab
+- English code comments
+- Heart beats with BPM influenced by device motion (shake)
+- For iOS: requestDeviceMotion permission on user gesture
+*/
 
-  <script src="script.js"></script>
+// ====== Globals ======
+const heartEl = document.getElementById('heart');
+const bpmEl = document.getElementById('bpm');
+const startBtn = document.getElementById('startBtn');
+
+const ekgCanvas = document.getElementById('ekg');
+const ekgCtx = ekgCanvas.getContext('2d');
+
+let canvasW = 800, canvasH = 220;
+ekgCanvas.width = canvasW;
+ekgCanvas.height = canvasH;
+
+// Audio
+const AudioCtx = window.AudioContext || window.webkitAudioContext;
+const audioCtx = new AudioCtx();
+
+// Heart model
+let baseBPM = 60;           // resting BPM
+let targetBPM = baseBPM;    // desired BPM influenced by shake
+let currentBPM = baseBPM;
+let lastBeatTime = performance.now();
+
+// Motion detection
+let enabledMotion = false;
+let lastAccel = 0;
+let accelLP = 0; // low-pass filtered magnitude
+const alpha = 0.1; // low-pass smoothing
+
+// Shake to BPM mapping parameters
+const maxExtraBPM = 140; // maximum additional BPM when shaking hard
+const accelToExtraBPM = 400; // scaling factor
+
+// EKG buffer
+const ekgBuffer = [];
+const ekgSpeed = 2.2; // pixels per frame for scrolling
+
+// UI update throttle
+function setBPM(val){
+  bpmEl.textContent = 'BPM: ' + Math.round(val);
+}
+
+// ===== Device Motion Handling =====
+async function enableMotion(){
+  // For iOS 13+ devices, need to request permission
+  if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+    try{
+      const res = await DeviceMotionEvent.requestPermission();
+      if (res !== 'granted') {
+        console.warn('DeviceMotion permission not granted:', res);
+        return false;
+      }
+    }catch(e){
+      console.warn('DeviceMotion requestPermission error', e);
+      return false;
+    }
+  }
+  // Add listener
+  window.addEventListener('devicemotion', onDeviceMotion, {passive:true});
+  enabledMotion = true;
+  return true;
+}
+
+function onDeviceMotion(e){
+  // Get acceleration including gravity and without
+  const a = e.acceleration || e.accelerationIncludingGravity || {x:0,y:0,z:0};
+  const ax = a.x || 0;
+  const ay = a.y || 0;
+  const az = a.z || 0;
+  const mag = Math.sqrt(ax*ax + ay*ay + az*az);
+
+  // compute high-pass like shake magnitude (difference from low-pass / gravity)
+  // low-pass filter magnitude
+  accelLP = accelLP + alpha * (mag - accelLP);
+  const shakeLevel = Math.max(0, mag - accelLP);
+
+  // some smoothing
+  lastAccel = lastAccel * 0.85 + shakeLevel * 0.15;
+
+  // map to target BPM (small shakes -> small increase)
+  const extra = Math.min(maxExtraBPM, lastAccel * accelToExtraBPM);
+  targetBPM = baseBPM + extra;
+}
+
+// ===== Heartbeat scheduling & animation =====
+function seconds(ms){ return ms / 1000; }
+
+function triggerBeat(){
+  // quick scale animation and click sound
+  // scale the heart SVG
+  heartEl.style.transition = 'transform 80ms cubic-bezier(.2,.9,.2,1)';
+  heartEl.style.transform = 'scale(1.18)';
+  setTimeout(()=> {
+    heartEl.style.transition = 'transform 260ms cubic-bezier(.2,.9,.2,1)';
+    heartEl.style.transform = 'scale(1)';
+  }, 80);
+
+  // Play a short low click to represent heartbeat
+  playBeatSound();
+}
+
+// Play short percussive beat sound
+function playBeatSound(){
+  const o = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  o.type = 'sine';
+  o.frequency.value = 80;
+  g.gain.value = 0.0001;
+  o.connect(g);
+  g.connect(audioCtx.destination);
+
+  // envelope
+  const t = audioCtx.currentTime;
+  g.gain.cancelScheduledValues(t);
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(0.06, t + 0.01);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + 0.12);
+
+  o.start(t);
+  o.stop(t + 0.14);
+}
+
+// Main loop
+function rafLoop(now){
+  // smooth current BPM towards target
+  currentBPM += (targetBPM - currentBPM) * 0.05;
+
+  // update UI
+  setBPM(currentBPM);
+
+  // determine interval between beats (ms)
+  const beatInterval = 60000 / Math.max(30, currentBPM); // clamp min 30 bpm
+
+  if (now - lastBeatTime >= beatInterval){
+    lastBeatTime = now;
+    triggerBeat();
+
+    // add EKG spike event to buffer (simulate QRS spike)
+    pushEkgSpike();
+  }
+
+  // draw EKG
+  drawEkg();
+
+  requestAnimationFrame(rafLoop);
+}
+
+// ===== EKG drawing =====
+function pushEkgSpike(){
+  // create a short set of points representing a spike; values roughly -1..1
+  const spike = [0, 0.12, 0.25, -0.2, 1.0, -0.6, 0.15, 0.05, 0];
+  // amplitude scales with bpm
+  const amp = 0.9 + (currentBPM - baseBPM) / 200;
+  for (let v of spike){
+    ekgBuffer.push(v * amp);
+  }
+}
+
+// Draw continuous scrolling EKG waveform
+let ekgOffset = 0;
+function drawEkg(){
+  // scroll buffer by ekgSpeed; keep buffer length reasonable
+  // render to canvas: baseline at mid height
+  const ctx = ekgCtx;
+  const W = ekgCanvas.width;
+  const H = ekgCanvas.height;
+
+  // shift existing image left by ekgSpeed pixels for smoothing
+  const shift = Math.round(ekgSpeed);
+  const image = ctx.getImageData(shift, 0, W - shift, H);
+  ctx.clearRect(0, 0, W, H);
+  ctx.putImageData(image, 0, 0);
+
+  // draw new vertical line on the right
+  const x = W - shift;
+  // compute sample from buffer (if empty -> baseline)
+  const sample = ekgBuffer.length ? ekgBuffer.shift() : 0;
+  // y position
+  const baseline = H * 0.5;
+  const amplitude = H * 0.28;
+  const y = baseline - sample * amplitude;
+
+  // draw a thin vertical column: draw a tiny dot/line at x
+  ctx.fillStyle = '#7ef6ff';
+  ctx.fillRect(x, y, 2, 2);
+
+  // draw faint baseline on whole canvas (overlay)
+  ctx.fillStyle = 'rgba(126,246,255,0.03)';
+  ctx.fillRect(0, baseline, W, 1);
+}
+
+// ===== Start / permission handling =====
+async function startLab(){
+  // resume audio
+  if (audioCtx.state === 'suspended') try { await audioCtx.resume(); } catch(e){}
+
+  // enable motion events (if required)
+  await enableMotion();
+
+  // hide start button
+  startBtn.textContent = 'Running — Shake your phone';
+  startBtn.style.opacity = 0.9;
+  startBtn.style.pointerEvents = 'none';
+
+  // kickoff loop
+  lastBeatTime = performance.now();
+  requestAnimationFrame(rafLoop);
+}
+
+// ===== Responsive canvas resize =====
+function resizeCanvas(){
+  // match CSS pixel size to device pixels
+  const dpr = window.devicePixelRatio || 1;
+  const rect = ekgCanvas.getBoundingClientRect();
+  canvasW = Math.max(240, Math.floor(rect.width * dpr));
+  canvasH = Math.max(120, Math.floor(rect.height * dpr));
+  ekgCanvas.width = canvasW;
+  ekgCanvas.height = canvasH;
+  ekgCtx.lineWidth = 2 * (dpr);
+  ekgCtx.strokeStyle = '#7ef6ff';
+  ekgCtx.fillStyle = '#7ef6ff';
+}
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas();
+
+// Start button
+startBtn.addEventListener('click', async () => {
+  // request motion on iOS - must be in user gesture
+  const ok = await enableMotion();
+  try { if (audioCtx.state === 'suspended') await audioCtx.resume(); } catch(e){}
+  if (!ok) {
+    startBtn.textContent = 'Motion denied — try browser settings';
+    setTimeout(()=>{ startBtn.textContent = 'Tap to Start'; }, 2000);
+    return;
+  }
+  startLab();
+});
+
+// also start if user taps anywhere (makes UX easier)
+document.body.addEventListener('touchstart', async function once(){ 
+  document.body.removeEventListener('touchstart', once);
+  // same as click: enable motion & audio
+  const ok = await enableMotion();
+  try { if (audioCtx.state === 'suspended') await audioCtx.resume(); } catch(e){}
+  if (ok) startLab();
+}, {passive:true});
+
+// keep everything safe: when page hidden, reduce CPU
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    // lower target BPM toward base to conserve updates
+    targetBPM = baseBPM;
+  }
+});
+
+// small calibration: gradually return targetBPM to base when no shaking
+setInterval(()=> {
+  // decay targetBPM toward base when motion quiet
+  if (!enabledMotion){
+    targetBPM = baseBPM;
+  } else {
+    // if lastAccel small, move targetBPM toward base
+    if (lastAccel < 0.02) {
+      targetBPM += (baseBPM - targetBPM) * 0.06;
+    }
+  }
+  // clamp
+  targetBPM = Math.max(30, Math.min(220, targetBPM));
+}, 300);
+
+// Friendly note in console
+console.log('Mobile Heart Lab loaded. Tap to start, then shake your phone.');
+
+</script>
 </body>
 </html>
